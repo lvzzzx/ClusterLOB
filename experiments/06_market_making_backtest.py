@@ -123,8 +123,8 @@ def run_backtest(
     print(f"Loading data from {file_path}...")
     df = pl.read_parquet(file_path).sort("ts_local_us")
     
-    # Filter valid columns
-    needed_cols = ["ts_local_us", "mid_px", "qty_int_f", "sign", "cluster"]
+        # Filter valid columns
+    needed_cols = ["ts_local_us", "mid_px", "bid_px1", "ask_px1", "qty_int_f", "sign", "cluster"]
     df = df.select(needed_cols)
     
     # Constants
@@ -164,7 +164,7 @@ def run_backtest(
     
     # Convert to numpy for slightly faster iteration
     data = df.to_numpy()
-    # indices: 0=ts, 1=mid, 2=qty, 3=sign, 4=cluster
+    # indices: 0=ts, 1=mid, 2=bid1, 3=ask1, 4=qty, 5=sign, 6=cluster
     
     start_ts_us = data[0, 0]
     
@@ -174,9 +174,11 @@ def run_backtest(
     for row in data:
         ts_us = row[0]
         mid = row[1]
-        qty = row[2] * AMOUNT_INC # Convert int to float qty
-        side = row[3] # 1 (Buy) or -1 (Sell) -> This is the TAKER side
-        cluster = row[4]
+        bid1 = row[2]
+        ask1 = row[3]
+        qty = row[4] * AMOUNT_INC # Convert int to float qty
+        side = row[5] # 1 (Buy) or -1 (Sell) -> This is the TAKER side
+        cluster = row[6]
         
         ts_sec = (ts_us - start_ts_us) / 1e6
         
@@ -209,12 +211,10 @@ def run_backtest(
         # 3. Fill Logic (Conservative Cross)
         # Incoming BUY (side=1) matches our ASK
         if side == 1:
-            # Did the trade price cross our ask?
-            # In a real backtest we'd check trade_price >= active_ask.
-            # Here we don't have exact trade price in the features file, only mid.
-            # We assume trade happens at Mid + Half Spread (approx).
-            # A conservative check: If Mid > Active Ask, we got run over.
-            if mid >= active_ask:
+            # Trade happened at ask1. We get filled if our active_ask is <= ask1.
+            # To be more conservative (assuming we are bottom of queue), 
+            # we could require active_ask < ask1, but active_ask <= ask1 is standard.
+            if ask1 >= active_ask:
                 fill_qty = min(qty, 1.0) # Cap fill size per trade to realistic limit
                 
                 # We SELL
@@ -229,7 +229,8 @@ def run_backtest(
                 
         # Incoming SELL (side=-1) matches our BID
         elif side == -1:
-            if mid <= active_bid:
+            # Trade happened at bid1. We get filled if our active_bid is >= bid1.
+            if bid1 <= active_bid:
                 fill_qty = min(qty, 1.0)
                 
                 # We BUY
@@ -240,8 +241,7 @@ def run_backtest(
                 fee = (fill_qty * active_bid) * (maker_fee_bps / 10000.0)
                 cash -= fee
                 
-                fills_count += 1
-                
+                fills_count += 1                
         trades_count += 1
         
     # --- Analysis ---

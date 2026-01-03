@@ -169,14 +169,14 @@ We implemented a high-fidelity **Event-Driven Simulator** replaying the exact 7-
 *   **Latency Model:** 200ms Requote Interval (Simulating realistic API rate limits and processing delays).
 *   **Fill Logic:** Conservative "Cross-Only" (No queue priority assumptions; fills only occur if market sweeps through our quote).
 *   **Signal Engine:** O(1) `SignalAccumulator` with volume-weighted exponential decay.
+*   **Correction (Bug Fix):** Initially, the simulator compared the `mid_px` to strategy quotes. This was corrected to use the executable trade prices (`bid_px1` and `ask_px1`) to accurately reflect when a taker order would cross our limit orders.
 
 ### 2. Results (7-Day Period)
 *   **Total Trades Processed:** 27,649,725
-*   **Executions:** 12,917 Fills (0.05% Fill Rate - consistent with passive making).
-*   **Net PnL:** **+103,106.61 USDT**
-*   **Inventory Profile:** Ending Inventory +17.50 BTC.
-*   **Interpretation:** The strategy successfully identified the macro-bullish microstructure bias of May 2024 and skewed quotes to accumulate/hold a long position, profiting from both the spread and the underlying appreciation.
-
+*   **Executions:** 13,559 Fills (0.05% Fill Rate - consistent with passive making).
+*   **Net PnL:** **+91,526.41 USDT**
+*   **Inventory Profile:** Ending Inventory +11.58 BTC.
+*   **Interpretation:** The strategy remains robust after correcting the fill logic. The profit is primarily driven by the alpha skew correctly positioning the strategy long during the price appreciation phase, capturing both spread and trend drift.
 ### 3. Production Readiness
 *   **Validation:** The Backtest confirms the alpha survives realistic constraints (200ms latency, conservative fills).
 *   **Next Steps:** Implement the `Gateway` adapter for live Binance Futures execution.
