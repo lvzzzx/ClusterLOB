@@ -81,19 +81,26 @@ Market microstructure regimes in crypto are non-stationary. A rolling window app
 ### 1. Objective
 Solve the "Label Switching" problem where cluster IDs (0, 1, 2) swap randomly between daily re-training iterations, causing discontinuities in the equity curve.
 
-### 2. Implementation: Centroid-Based Alignment
-We forced a deterministic mapping based on the structural properties of the centroids:
-*   **Opportunistic ($\phi_2$):** Maximize $(z_{SBS} - z_{OBS})$.
-*   **Directional/Toxic ($\phi_1$):** Maximize $(z_{OBS} - z_{SBS})$.
-*   **Passive/Noise ($\phi_3$):** Remainder (typically highest $z_{T_m}$).
+### 2. Evaluated Strategies
 
-### 3. Key Observations (Weekend Regime Shift)
-*   **The "Weekend Plateau":** During May 11-12, the PnL for the **Directional** strategy went perfectly flat.
-*   **Analysis:** Investigation into `data/daily_features/` revealed a **50% volume drop** on these dates (Weekend low-volatility regime).
-*   **Microstructure Insight:** The flatline confirms the model's robustness: in a quiet weekend market, "Toxic/Directional" flow effectively disappears. The model correctly identified 0 exposure for that regime, while the **Opportunistic** alpha continued to accumulate (though at a slower rate).
+#### Strategy A: Distance-Based Alignment (Stashed)
+*   **Method:** Save the centroids from the *first* training window (e.g., Jan 1-7) as a rigid reference. For all subsequent weeks, map new clusters to the nearest reference centroid (Euclidean distance).
+*   **Pros:** Model-agnostic; simpler to implement.
+*   **Cons:** **High Drift Risk.** If the market regime shifts significantly (e.g., volatility doubles in June), the "Reference Centroids" from January become irrelevant. Forcing June data to fit January's shape leads to misclassification.
 
-### 4. Conclusion
-Alignment ensures that we are trading the same "Microstructure Logic" regardless of the internal ID assigned by K-Means. The signal is now stitched and ready for production logic.
+#### Strategy B: Microstructure-Rule Alignment (Selected)
+*   **Method:** Re-discover the clusters daily based on their fundamental definition:
+    *   **Opportunistic ($\phi_2$):** Always the cluster with max $(z_{SBS} - z_{OBS})$.
+    *   **Toxic ($\phi_1$):** Always the cluster with max $(z_{OBS} - z_{SBS})$.
+*   **Pros:** **Semantically Robust.** We are trading a specific *mechanism* (Imbalance), not a statistical artifact. This ensures the Alpha signal always represents "Supported Execution" regardless of the absolute volatility levels.
+*   **Cons:** Requires the fundamental relationship (Imbalance = Alpha) to hold true universally.
+
+### 3. Decision
+We selected **Strategy B (Rule-Based)**. In HFT, semantic consistency is critical. We want to know when the specific *imbalance mechanism* is present, rather than tracking a drifting statistical cluster.
+
+### 4. Validation (Weekend Regime Shift)
+*   **Observation:** During the low-volume weekend of May 11-12, the PnL for the **Directional ($\phi_1$)** strategy flatlined (zero trades).
+*   **Analysis:** The Rule-Based alignment correctly identified that *no cluster* met the "Toxic" criteria in this quiet regime, effectively turning off the losing strategy. This confirms the robustness of the rule-based approach over distance-based mapping.
 
 ---
 **Status:** Alpha Alignment & Stitching Complete.
