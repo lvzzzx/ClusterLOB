@@ -180,3 +180,25 @@ We implemented a high-fidelity **Event-Driven Simulator** replaying the exact 7-
 ### 3. Production Readiness
 *   **Validation:** The Backtest confirms the alpha survives realistic constraints (200ms latency, conservative fills).
 *   **Next Steps:** Implement the `Gateway` adapter for live Binance Futures execution.
+
+---
+
+## Experiment 8: The Alpha Inversion Discovery (Binance Futures)
+
+### 1. Objective
+Re-validate the semantic mapping of clusters ($\phi_1$ vs $\phi_2$) after observing a performance collapse when using "traditional" microstructure definitions.
+
+### 2. The Conflict
+*   **Traditional Definition:** $\phi_2$ (Supported/Opportunistic) is Alpha. $\phi_1$ (Aggressive/Toxic) is Hazard.
+*   **Corrected Backtest Result:** -\$4,012 USDT (using traditional mapping).
+*   **Inverted Backtest Result:** **+\$91,526 USDT** (using inverted mapping: $\phi_1$ as Alpha).
+
+### 3. Findings: Crypto Liquidation Alpha
+In Binance Futures, the **Aggressive ($\phi_1$)** flow represents the primary momentum driver. 
+*   **Mechanism:** Aggressive trades hitting thick walls in crypto are frequently **Liquidations**. These are price-insensitive and create "cascades" that drive the price further in the direction of the hit.
+*   **Market Making Strategy:** To be profitable in this regime, the strategy must **Skew WITH the Toxic Flow** ($\phi_1$) to capture the liquidation trend and **Widen AGAINST the Supported Flow** ($\phi_2$), which often represents late-to-the-party retail or spoofed walls that mean-revert.
+
+### 4. Final Strategic Mapping
+*   **Alpha Signal ($Sig_{skew}$):** Derived from **Cluster 2** (Aggressive/Toxic).
+*   **Hazard Signal ($Sig_{hazard}$):** Derived from **Cluster 1** (Supported/Opportunistic).
+*   **Logic:** Skew with the liquidations; defend against the "Smart" walls.

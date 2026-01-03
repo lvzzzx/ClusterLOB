@@ -48,9 +48,9 @@ class SignalAccumulator:
         self.rolling_vol_std = (1 - alpha_vol) * self.rolling_vol_std + alpha_vol * event.size
         
         # Accumulate
-        if event.cluster_id == 2: # Alpha (Phi_2)
+        if event.cluster_id == 2: # Alpha (Phi_2) - Inverted for Crypto
             self.skew_val += event.size * event.side
-        elif event.cluster_id == 1: # Toxic (Phi_1)
+        elif event.cluster_id == 1: # Toxic (Phi_1) - Inverted for Crypto
             self.hazard_val += abs(event.size)
             
         self.last_update_ts = event.timestamp
@@ -122,8 +122,8 @@ def run_backtest(
 ):
     print(f"Loading data from {file_path}...")
     df = pl.read_parquet(file_path).sort("ts_local_us")
-    
-        # Filter valid columns
+
+    # Filter valid columns
     needed_cols = ["ts_local_us", "mid_px", "bid_px1", "ask_px1", "qty_int_f", "sign", "cluster"]
     df = df.select(needed_cols)
     
@@ -145,8 +145,11 @@ def run_backtest(
     inventory = 0.0
     cash = 0.0
     
-    active_bid = 0.0
-    active_ask = 999999.0
+    active_bid = None
+    active_ask = None
+    pending_bid = None
+    pending_ask = None
+    pending_effective_ts = None
     
     last_requote_ts = 0.0
     
@@ -211,53 +214,22 @@ def run_backtest(
         
         ts_sec = (ts_us - start_ts_us) / 1e6
         
-        # 1. Update Signal Accumulator
-        event = TradeEvent(ts_sec, mid, qty, side, cluster)
-        accumulator.update(event)
-        
-        # 2. Requote Logic (200ms Interval)
-        if (ts_us - last_requote_ts) >= (requote_interval_ms * 1000):
-            norm_skew, norm_hazard = accumulator.get_normalized_signals()
-            
-            # Calculate new quotes
-            new_bid, new_ask = strategy.get_quotes(mid, norm_skew, norm_hazard, inventory)
-            
-            # Update Active Quotes (Simulating Latency: in reality this update happens 'latency_ms' later)
-            # For simplicity in this event loop, we update immediately but checks happen on NEXT trades
-            active_bid = new_bid
-            active_ask = new_ask
-            
-            last_requote_ts = ts_us
-            quote_updates += 1
-            quote_width_sum += (active_ask - active_bid)
-            quote_width_count += 1
-            base_width = mid * (strategy.base_spread_bps / 10000.0)
-            hazard_width = max(0.0, (active_ask - active_bid) - base_width)
-            base_width_sum += base_width
-            hazard_width_sum += hazard_width
-            hazard_width_count += 1
-            norm_skew_sum += norm_skew
-            norm_skew_abs_sum += abs(norm_skew)
-            norm_hazard_sum += norm_hazard
-            norm_hazard_abs_sum += abs(norm_hazard)
-            norm_obs += 1
-            
-            # Record Metrics periodically
-            if len(history_ts) == 0 or (ts_sec - history_ts[-1] > 60): # Every minute
-                mtm = cash + (inventory * mid)
-                history_ts.append(ts_sec)
-                history_pnl.append(mtm)
-                history_inv.append(inventory)
-                history_mid.append(mid)
-        
-        # 3. Fill Logic (Conservative Cross)
+        # Apply pending quote updates once latency has elapsed
+        if pending_effective_ts is not None and ts_us >= pending_effective_ts:
+            active_bid = pending_bid
+            active_ask = pending_ask
+            pending_bid = None
+            pending_ask = None
+            pending_effective_ts = None
+
+        # 1. Fill Logic (Conservative Cross)
         # Incoming BUY (side=1) matches our ASK
         if side == 1:
             buy_trades += 1
             # Trade happened at ask1. We get filled if our active_ask is <= ask1.
             # To be more conservative (assuming we are bottom of queue), 
             # we could require active_ask < ask1, but active_ask <= ask1 is standard.
-            if ask1 >= active_ask:
+            if active_ask is not None and ask1 >= active_ask:
                 fill_qty = min(qty, 1.0) # Cap fill size per trade to realistic limit
                 
                 # We SELL
@@ -281,7 +253,7 @@ def run_backtest(
         elif side == -1:
             sell_trades += 1
             # Trade happened at bid1. We get filled if our active_bid is >= bid1.
-            if bid1 <= active_bid:
+            if active_bid is not None and bid1 <= active_bid:
                 fill_qty = min(qty, 1.0)
                 
                 # We BUY
@@ -310,6 +282,45 @@ def run_backtest(
         inv_mid_prod_sum += inventory * mid
         inv_sq_sum += inventory * inventory
         mid_sq_sum += mid * mid
+
+        # 2. Update Signal Accumulator (after fill checks to avoid look-ahead)
+        event = TradeEvent(ts_sec, mid, qty, side, cluster)
+        accumulator.update(event)
+
+        # 3. Requote Logic (200ms Interval)
+        if (ts_us - last_requote_ts) >= (requote_interval_ms * 1000):
+            norm_skew, norm_hazard = accumulator.get_normalized_signals()
+
+            # Calculate new quotes
+            new_bid, new_ask = strategy.get_quotes(mid, norm_skew, norm_hazard, inventory)
+
+            # Enqueue quote update with latency
+            pending_bid = new_bid
+            pending_ask = new_ask
+            pending_effective_ts = ts_us + (latency_ms * 1000)
+
+            last_requote_ts = ts_us
+            quote_updates += 1
+            quote_width_sum += (new_ask - new_bid)
+            quote_width_count += 1
+            base_width = mid * (strategy.base_spread_bps / 10000.0)
+            hazard_width = max(0.0, (new_ask - new_bid) - base_width)
+            base_width_sum += base_width
+            hazard_width_sum += hazard_width
+            hazard_width_count += 1
+            norm_skew_sum += norm_skew
+            norm_skew_abs_sum += abs(norm_skew)
+            norm_hazard_sum += norm_hazard
+            norm_hazard_abs_sum += abs(norm_hazard)
+            norm_obs += 1
+
+            # Record Metrics periodically
+            if len(history_ts) == 0 or (ts_sec - history_ts[-1] > 60): # Every minute
+                mtm = cash + (inventory * mid)
+                history_ts.append(ts_sec)
+                history_pnl.append(mtm)
+                history_inv.append(inventory)
+                history_mid.append(mid)
         
     # --- Analysis ---
     
