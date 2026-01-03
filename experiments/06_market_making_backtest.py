@@ -170,6 +170,35 @@ def run_backtest(
     
     trades_count = 0
     fills_count = 0
+    buy_trades = 0
+    sell_trades = 0
+    buy_fills = 0
+    sell_fills = 0
+    fill_qty_total = 0.0
+    fill_notional = 0.0
+    fees_total = 0.0
+    edge_qty_sum = 0.0
+    edge_tick_qty_sum = 0.0
+    quote_updates = 0
+    quote_width_sum = 0.0
+    quote_width_count = 0
+    base_width_sum = 0.0
+    hazard_width_sum = 0.0
+    hazard_width_count = 0
+    norm_skew_sum = 0.0
+    norm_skew_abs_sum = 0.0
+    norm_hazard_sum = 0.0
+    norm_hazard_abs_sum = 0.0
+    norm_obs = 0
+    inv_min = 0.0
+    inv_max = 0.0
+    inv_abs_sum = 0.0
+    inv_obs = 0
+    inventory_sum = 0.0
+    mid_sum = 0.0
+    inv_mid_prod_sum = 0.0
+    inv_sq_sum = 0.0
+    mid_sq_sum = 0.0
     
     for row in data:
         ts_us = row[0]
@@ -199,6 +228,19 @@ def run_backtest(
             active_ask = new_ask
             
             last_requote_ts = ts_us
+            quote_updates += 1
+            quote_width_sum += (active_ask - active_bid)
+            quote_width_count += 1
+            base_width = mid * (strategy.base_spread_bps / 10000.0)
+            hazard_width = max(0.0, (active_ask - active_bid) - base_width)
+            base_width_sum += base_width
+            hazard_width_sum += hazard_width
+            hazard_width_count += 1
+            norm_skew_sum += norm_skew
+            norm_skew_abs_sum += abs(norm_skew)
+            norm_hazard_sum += norm_hazard
+            norm_hazard_abs_sum += abs(norm_hazard)
+            norm_obs += 1
             
             # Record Metrics periodically
             if len(history_ts) == 0 or (ts_sec - history_ts[-1] > 60): # Every minute
@@ -211,6 +253,7 @@ def run_backtest(
         # 3. Fill Logic (Conservative Cross)
         # Incoming BUY (side=1) matches our ASK
         if side == 1:
+            buy_trades += 1
             # Trade happened at ask1. We get filled if our active_ask is <= ask1.
             # To be more conservative (assuming we are bottom of queue), 
             # we could require active_ask < ask1, but active_ask <= ask1 is standard.
@@ -226,9 +269,17 @@ def run_backtest(
                 cash -= fee
                 
                 fills_count += 1
+                sell_fills += 1
+                fill_qty_total += fill_qty
+                fill_notional += (fill_qty * active_ask)
+                fees_total += fee
+                edge = max(0.0, active_ask - mid)
+                edge_qty_sum += edge * fill_qty
+                edge_tick_qty_sum += (edge / MIN_TICK) * fill_qty
                 
         # Incoming SELL (side=-1) matches our BID
         elif side == -1:
+            sell_trades += 1
             # Trade happened at bid1. We get filled if our active_bid is >= bid1.
             if bid1 <= active_bid:
                 fill_qty = min(qty, 1.0)
@@ -241,13 +292,58 @@ def run_backtest(
                 fee = (fill_qty * active_bid) * (maker_fee_bps / 10000.0)
                 cash -= fee
                 
-                fills_count += 1                
+                fills_count += 1
+                buy_fills += 1
+                fill_qty_total += fill_qty
+                fill_notional += (fill_qty * active_bid)
+                fees_total += fee
+                edge = max(0.0, mid - active_bid)
+                edge_qty_sum += edge * fill_qty
+                edge_tick_qty_sum += (edge / MIN_TICK) * fill_qty
         trades_count += 1
+        inv_min = min(inv_min, inventory)
+        inv_max = max(inv_max, inventory)
+        inv_abs_sum += abs(inventory)
+        inv_obs += 1
+        inventory_sum += inventory
+        mid_sum += mid
+        inv_mid_prod_sum += inventory * mid
+        inv_sq_sum += inventory * inventory
+        mid_sq_sum += mid * mid
         
     # --- Analysis ---
     
     print(f"Simulation Complete. Processed {trades_count} trades.")
     print(f"Total Fills: {fills_count} (Fill Rate: {fills_count/trades_count*100:.2f}%)")
+    if buy_trades > 0:
+        print(f"Buy Trades: {buy_trades} | Sell Fills: {sell_fills} (Hit Rate: {sell_fills/buy_trades*100:.2f}%)")
+    if sell_trades > 0:
+        print(f"Sell Trades: {sell_trades} | Buy Fills: {buy_fills} (Hit Rate: {buy_fills/sell_trades*100:.2f}%)")
+    if fill_qty_total > 0:
+        avg_fill_size = fill_qty_total / max(fills_count, 1)
+        avg_fill_px = fill_notional / fill_qty_total
+        avg_edge = edge_qty_sum / fill_qty_total
+        avg_edge_ticks = edge_tick_qty_sum / fill_qty_total
+        print(f"Filled Qty: {fill_qty_total:.4f} BTC | Avg Fill Size: {avg_fill_size:.4f} BTC")
+        print(f"Fill Notional: {fill_notional:.2f} USDT | VWAP: {avg_fill_px:.2f}")
+        print(f"Avg Edge vs Mid: {avg_edge:.4f} USDT ({avg_edge_ticks:.2f} ticks)")
+    if quote_width_count > 0:
+        print(f"Quote Updates: {quote_updates} | Avg Quote Width: {(quote_width_sum/quote_width_count):.4f} USDT")
+        print(f"Avg Base Width: {(base_width_sum/max(hazard_width_count,1)):.4f} USDT | Avg Hazard Width: {(hazard_width_sum/max(hazard_width_count,1)):.4f} USDT")
+    if norm_obs > 0:
+        print(f"Norm Skew Avg/AbsAvg: {(norm_skew_sum/norm_obs):.6f}/{(norm_skew_abs_sum/norm_obs):.6f}")
+        print(f"Norm Hazard Avg/AbsAvg: {(norm_hazard_sum/norm_obs):.6f}/{(norm_hazard_abs_sum/norm_obs):.6f}")
+    if inv_obs > 0:
+        print(f"Inventory Min/Max: {inv_min:.4f}/{inv_max:.4f} BTC | Avg Abs Inv: {(inv_abs_sum/inv_obs):.4f} BTC")
+        inv_mean = inventory_sum / inv_obs
+        mid_mean = mid_sum / inv_obs
+        inv_var = (inv_sq_sum / inv_obs) - (inv_mean * inv_mean)
+        mid_var = (mid_sq_sum / inv_obs) - (mid_mean * mid_mean)
+        cov = (inv_mid_prod_sum / inv_obs) - (inv_mean * mid_mean)
+        if inv_var > 0 and mid_var > 0:
+            corr = cov / (np.sqrt(inv_var) * np.sqrt(mid_var))
+            print(f"Inventory-Mid Corr (simple): {corr:.6f}")
+    print(f"Total Maker Fees (rebate < 0): {fees_total:.2f} USDT")
     
     final_mid = data[-1, 1]
     final_pnl = cash + (inventory * final_mid)

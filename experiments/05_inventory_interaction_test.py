@@ -223,20 +223,22 @@ def run_simulation(n_events=10000, interaction_mode='FIXED'):
         norm_skew, norm_hazard = accumulator.get_normalized_signals()
         
         # 4. Market Maker Action (Before filling this trade, we effectively quoted)
-        # In a real backtest, we'd check if previous quotes were hit. 
-        # Here we simplify: if trade crosses our quote, we fill.
+        # In a real backtest, we'd check if previous quotes were hit.
+        # Here we simplify: approximate an executable trade price and check if it crosses our quote.
         
         bid, ask, fv = strategy.get_quotes(mid_price, norm_skew, norm_hazard)
+        w_dynamic = ask - bid
+        trade_price = mid_price + (w_dynamic / 2.0) * side
         
         filled_side = 0
         fill_price = 0.0
         
         # Incoming SELL (side = -1) hits our BID
-        if event.side == -1 and event.price <= bid:
+        if event.side == -1 and trade_price <= bid:
             filled_side = 1 # We Buy
             fill_price = bid
         # Incoming BUY (side = 1) hits our ASK
-        elif event.side == 1 and event.price >= ask:
+        elif event.side == 1 and trade_price >= ask:
             filled_side = -1 # We Sell
             fill_price = ask
             
