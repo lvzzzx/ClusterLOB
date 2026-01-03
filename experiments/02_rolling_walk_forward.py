@@ -7,7 +7,6 @@ import polars as pl
 from sklearn.cluster import KMeans
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
 # Add project root to path
 sys.path.append(os.getcwd())
@@ -200,6 +199,10 @@ def rolling_walk_forward(
     os.makedirs(mpl_cache_dir, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", mpl_cache_dir)
     
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    
     # 1. Pivot
     all_res = all_res.with_columns(pl.col("cluster").cast(pl.Utf8))
     pivoted = all_res.pivot(
@@ -242,13 +245,16 @@ def rolling_walk_forward(
         signal = df[signal_col].cast(pl.Float64).to_numpy()
         returns = df["FRNB"].cast(pl.Float64).to_numpy()
         
+        global_upper = np.percentile(signal, threshold * 100)
+        global_lower = np.percentile(signal, (1 - threshold) * 100)
+
         # Rolling Threshold
         upper = (
             pl.Series(signal)
             .rolling_quantile(threshold, window_size=window)
             .shift(1)
             .fill_null(strategy="forward")
-            .fill_null(0) # fallback
+            .fill_null(global_upper)
             .to_numpy()
         )
         lower = (
@@ -256,7 +262,7 @@ def rolling_walk_forward(
             .rolling_quantile(1-threshold, window_size=window)
             .shift(1)
             .fill_null(strategy="forward")
-            .fill_null(0)
+            .fill_null(global_lower)
             .to_numpy()
         )
         
