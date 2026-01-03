@@ -6,9 +6,9 @@
 ---
 
 ## 1. Executive Summary
-This document outlines the adaptation of the **ClusterLOB** methodology for the cryptocurrency market, specifically **Binance BTC/USDT**. Utilizing "Choice 2" (Trade-Only Clustering), we aim to decompose the aggregate order flow into three behavioral regimes: **Directional ($\phi_1$)**, **Opportunistic ($\phi_2$)**, and **Noise/Market-Making ($\phi_3$)**.
+This document outlines the adaptation of the **ClusterLOB** methodology for the cryptocurrency market, specifically **Binance BTC/USDT**. Utilizing "Choice 2" (Trade-Only Clustering on L2), we aim to decompose the aggregate order flow into three behavioral regimes: **Directional ($\phi_1$)**, **Opportunistic ($\phi_2$)**, and **Noise/Market-Making ($\phi_3$)**.
 
-The strategy leverages the `pointline` Data Lake to perform high-frequency feature engineering on Level 2 (L2) data, aiming to isolate the "Opportunistic" signal which identifies institutional accumulation patterns that survive the high-fee barrier of crypto trading.
+The strategy leverages the `pointline` Data Lake to perform high-frequency feature engineering on Level 2 (L2) snapshots aligned to trade events, aiming to isolate the "Opportunistic" signal which identifies accumulation patterns that survive the fee barrier of crypto trading.
 
 ---
 
@@ -27,19 +27,23 @@ Crypto markets are characterized by massive retail participation and high noise.
 
 ## 3. The Crypto Adaptation (L2 vs. L3)
 
-The primary technical hurdle is the absence of **Level 3 (Order-Level)** data on Binance. We must pivot from tracking specific Order IDs to tracking **Liquidity States**.
+The primary technical hurdle is the absence of **Level 3 (Order-Level)** data on Binance. We must pivot from tracking specific Order IDs to **trade-triggered L2 states** (book context immediately before the trade).
 
 ### 3.1 Feature Engineering Specification
-We will derive 6 core features ($X$) for every trade trigger, utilizing the `pointline` Delta Lake. These features are designed to capture the "Book Response" to the incoming trade flow.
+We will derive core features ($X$) for every trade trigger using trade + L2 snapshot `asof` alignment. These features are designed to capture the "Book Response" to incoming trade flow.
 
 | Feature | Notation | Crypto (L2) Implementation |
 | :--- | :--- | :--- |
-| **Relative Volume** | $V_{rel}$ | Ratio of trade quantity to total volume at the touch: $V_{trade} / V_{L1}$. Captures "level consumption." |
-| **Mid-Price Recency** | $T_m$ | Time elapsed since the last mid-price change: $t_{now} - t_{last\_mid\_change}$. |
-| **Stable-Liquidity Age** | $T_{age}$ | Time elapsed since the *Price Level* itself was established (i.e., first quote at this price). |
-| **Same-Side Shape** | $SBS$ | Cumulative volume of the first 5 price levels on the trade's side of the book (Log-scaled). |
-| **Opposite-Side Shape** | $OBS$ | Cumulative volume of the first 5 price levels on the opposite side (Log-scaled). |
-| **Spread Width** | $S$ | The bid-ask spread normalized by the mid-price at the moment of execution (in basis points). |
+| **Relative Volume** | $V_{rel}$ | Ratio of trade quantity to total L1 volume: $V_{trade} / (V_{bid1}+V_{ask1})$. Captures "level consumption." |
+| **Mid-Price Recency** | $T_m$ | Time since last mid-price change in snapshots: $t_{trade} - t_{last\_mid\_change}$. |
+| **Level Update Age (Proxy)** | $T_{age}$ | Time since last update at the trade-side L1 price. If persistent L2 state is unavailable, drop this feature. |
+| **Same-Side Shape** | $SBS$ | Cumulative volume of the first 5 price levels on the trade's side of the book (log-scaled). |
+| **Opposite-Side Shape** | $OBS$ | Cumulative volume of the first 5 price levels on the opposite side (log-scaled). |
+| **Spread Width** | $S$ | The bid-ask spread normalized by mid-price at execution (in bps). |
+
+**Trade Sign / Size:**
+*   **Trade Sign** $s_t \in \{-1, +1\}$ from aggressor flags (or tick rule fallback).
+*   **Signed Size**: $SignSize = s_t \cdot V_{trade}$ used in OFI aggregation.
 
 ---
 
@@ -47,21 +51,36 @@ We will derive 6 core features ($X$) for every trade trigger, utilizing the `poi
 
 ### Phase 1: Data Binding (Polars/Delta Lake)
 *   Integrate `pointline.research` to scan `silver.trades` and `silver.book_snapshots_top25`.
-*   Implement `join_asof` logic to synchronize trade triggers with the most recent L2 snapshot context.
-*   **Fixed-Point Handling:** Retain `int64` encoding for `price_int` and `qty_int` throughout the feature extraction to maintain precision.
+*   Use `join_asof` to attach the most recent L2 snapshot **before** each trade (no lookahead).
+*   **Fixed-Point Handling:** Retain `int64` encoding for `price_int` and `qty_int` throughout feature extraction.
+*   **Aggressor Side:** Prefer exchange-provided side; fallback to tick rule only if needed.
 
 ### Phase 2: Unsupervised Learning Pipeline
-1.  **Normalization:** Log-transform $V$ and apply Z-score standardization: $z = \frac{x - \mu}{\sigma}$.
-2.  **Clustering:** Apply K-means++ ($k=3$) to a rolling 24-hour window.
-3.  **Labeling:** Perform predictive regression: $r_{t+\Delta t} = \beta \cdot OFI(\phi_k)$.
-    *   $\phi_1 \to$ High correlation with $r_{t+1s}$.
-    *   $\phi_2 \to$ High correlation with $r_{t+60s}$.
+1.  **Normalization:** Log-transform depth-related features ($SBS$, $OBS$) and apply Z-score standardization: $z = \frac{x - \mu}{\sigma}$. Leave ratios ($V_{rel}$) unlogged.
+2.  **Clustering:** Apply K-means++ ($k=3$) to a rolling 24-hour window of trade events.
+3.  **Labeling (Bucket-Based Horizons):** Use bucket returns rather than fixed seconds to avoid clock‑time mismatch in crypto. Define a bucket size $B$ (e.g., 5m). For each bucket:
+    \[
+    CONR = \log\left(\frac{P_{end}}{P_{start}}\right),\quad
+    FRNB = \log\left(\frac{P_{end}^{next}}{P_{end}}\right)
+    \]
+    Then regress:
+    \[
+    r = \beta \cdot OFI(\phi_k)
+    \]
+    *   $\phi_1 \to$ High correlation with **CONR** (in‑bucket impact / toxic flow).
+    *   $\phi_2 \to$ High correlation with **FRNB** (next‑bucket drift / latent flow).
+
+**OFI Definition (Trade-Only):**
+\[
+OFI^{S}(\phi_k) = \sum_{i \in \phi_k} SignSize_i,\quad
+OFI^{C}(\phi_k) = \sum_{i \in \phi_k} sign(SignSize_i)
+\]
 
 ### Phase 3: Backtesting & Fee Logic
-The alpha must survive the **Taker Fee Barrier** (~2-4 bps).
+The alpha must survive the **Taker Fee Barrier** (parameterized by Binance tier).
 *   **Execution Model:** Crossing the spread (Taker).
 *   **Cost Model:** $PnL = (Sign \cdot \Delta Price) - (Fee + Slippage)$.
-*   **Optimization:** Tune the $OFI(\phi_2)$ threshold to maximize the Sharpe Ratio net of costs.
+*   **Optimization:** Tune the $OFI(\phi_2)$ threshold to maximize Sharpe net of costs.
 
 ---
 
