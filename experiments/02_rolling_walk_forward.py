@@ -108,6 +108,38 @@ def rolling_walk_forward(
         kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
         kmeans.fit(X_train)
         
+        # --- Cluster Alignment ---
+        # Map clusters to consistent labels:
+        # 0: Passive (High Tm or remaining)
+        # 1: Opportunistic (Alpha) -> Max (SBS - OBS)
+        # 2: Directional (Toxic) -> Max (OBS - SBS)
+        
+        centroids = kmeans.cluster_centers_
+        # feature_cols indices: 0:z_v_rel, 1:z_sbs, 2:z_obs, 3:z_spread, 4:z_t_m, 5:z_t_age
+        
+        # 1. Identify Opportunistic (Label 1)
+        # Criteria: Maximize (z_sbs - z_obs)
+        opp_scores = centroids[:, 1] - centroids[:, 2]
+        opp_idx = np.argmax(opp_scores)
+        
+        # 2. Identify Directional (Label 2)
+        # Criteria: Maximize (z_obs - z_sbs), excluding opp_idx
+        dir_scores = centroids[:, 2] - centroids[:, 1]
+        dir_scores_masked = dir_scores.copy()
+        dir_scores_masked[opp_idx] = -np.inf
+        dir_idx = np.argmax(dir_scores_masked)
+        
+        # 3. Identify Passive (Label 0)
+        # Remaining cluster
+        passive_idx = [i for i in range(k) if i != opp_idx and i != dir_idx][0]
+        
+        # Create mapping: original_idx -> aligned_label
+        mapping = {
+            passive_idx: 0,
+            opp_idx: 1,
+            dir_idx: 2
+        }
+        
         # 3. Load Test Data
         test_feat_path = os.path.join(features_dir, f"features_{test_day_str}.parquet")
         test_snap_path = os.path.join(features_dir, f"snaps_{test_day_str}.parquet")
@@ -130,7 +162,10 @@ def rolling_walk_forward(
         X_test = clean_test.select(feature_cols).to_numpy()
         labels = kmeans.predict(X_test)
         
-        clustered_test = clean_test.with_columns(pl.Series("cluster", labels))
+        # Apply alignment mapping
+        aligned_labels = np.array([mapping[l] for l in labels])
+        
+        clustered_test = clean_test.with_columns(pl.Series("cluster", aligned_labels))
         
         # 5. Compute Alpha (OFI vs FRNB)
         bucketed = bucket_ofi(clustered_test, bucket_us)
@@ -167,10 +202,16 @@ def rolling_walk_forward(
     ).fill_null(0).sort("bucket_ts")
     
     # Identify Phi_2 (Opportunistic)
-    # Heuristic: In our previous exp, Cluster 1 was Phi_2.
-    # In a rolling window, cluster IDs might swap (0 becomes 1).
-    # Ideally, we map them by centroid properties. 
-    # For this script, we output all 3 equity curves.
+    # Clusters are now aligned:
+    # 0: Passive
+    # 1: Opportunistic (Alpha)
+    # 2: Directional
+    
+    cluster_names = {
+        0: "Passive (Noise)",
+        1: "Opportunistic (Alpha)",
+        2: "Directional (Toxic)"
+    }
     
     plt.figure(figsize=(12, 6))
     
@@ -181,7 +222,7 @@ def rolling_walk_forward(
         # PnL = Sign(OFI) * Return
         # We use series math directly
         pnl_series = (pivoted[col].sign() * pivoted["FRNB"]).cum_sum()
-        plt.plot(pnl_series.to_numpy(), label=f"Cluster {c}")
+        plt.plot(pnl_series.to_numpy(), label=cluster_names.get(c, f"Cluster {c}"))
         
     plt.title(f"Rolling Walk-Forward PnL (Train={train_window_days}d)")
     plt.legend()
