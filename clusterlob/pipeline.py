@@ -388,6 +388,27 @@ def add_bucket_returns(
     )
 
 
+
+def load_and_extract_features(
+    exchange: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    window: int,
+    depth: int,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    asof = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+    meta = resolve_symbol_meta(exchange, symbol, asof)
+
+    trades = load_trades_lazy(exchange, meta.symbol_id, start_date, end_date)
+    snaps = load_snapshots_lazy(exchange, meta.exchange_id, meta.symbol_id, start_date, end_date)
+    snaps = enrich_snapshots(snaps, meta.price_increment, meta.amount_increment, depth)
+
+    joined = join_trade_context(trades, snaps)
+    feats = compute_features(joined, window, meta.amount_increment).collect()
+    
+    return feats, snaps.collect()
+
 def run_pipeline(
     exchange: str,
     symbol: str,
