@@ -76,7 +76,7 @@ def run_resampled_backtest(
     
     joined = joined.with_columns(
         pl.from_epoch(pl.col("bucket_ts"), time_unit=time_unit).alias("datetime")
-    )
+    ).sort("datetime")
     
     print(f"Resampling to {resample_minutes} minutes...")
     # Resample
@@ -93,8 +93,8 @@ def run_resampled_backtest(
     
     # 2. Strategy Logic (Same as before)
     # Cluster 1 = Alpha
-    signal_series = resampled["1"].to_numpy()
-    frnb_series = resampled["FRNB"].to_numpy()
+    signal_series = resampled["1"].cast(pl.Float64).to_numpy()
+    frnb_series = resampled["FRNB"].cast(pl.Float64).to_numpy()
     
     # Rolling Window Calculation (buckets in window)
     # 1 Day = 1440 mins.
@@ -127,6 +127,11 @@ def run_resampled_backtest(
     position = np.zeros(len(signal_series))
     position[signal_series > upper_threshold] = 1
     position[signal_series < lower_threshold] = -1
+    
+    # FIX LOOKAHEAD: Position determined at T trades Return at T+1
+    # We use OFI(T) to predict Return(T+1)
+    position = np.roll(position, 1)
+    position[0] = 0
     
     # PnL
     gross_ret = position * frnb_series

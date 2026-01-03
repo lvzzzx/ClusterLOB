@@ -192,43 +192,112 @@ def rolling_walk_forward(
     os.makedirs(out_dir, exist_ok=True)
     all_res.write_parquet(os.path.join(out_dir, "rolling_results.parquet"))
     
-    # Calculate PnL Curve
-    # Pivot
+    # --- Advanced Plotting: 30m Resampled + 3bps Cost + Top 75% Threshold ---
+    print("Generating Robust Performance Plot (30m Resampled, 3bps Cost)...")
+    
+    # Set MPL Cache
+    mpl_cache_dir = os.path.join(out_dir, ".mpl_cache")
+    os.makedirs(mpl_cache_dir, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", mpl_cache_dir)
+    
+    # 1. Pivot
+    all_res = all_res.with_columns(pl.col("cluster").cast(pl.Utf8))
     pivoted = all_res.pivot(
         values="ofi_s",
-        index=["bucket_ts", "FRNB"],
+        index=["bucket_ts"],
         on="cluster",
         aggregate_function="sum"
     ).fill_null(0).sort("bucket_ts")
     
-    # Identify Phi_2 (Opportunistic)
-    # Clusters are now aligned:
-    # 0: Passive
-    # 1: Opportunistic (Alpha)
-    # 2: Directional
+    # Get Returns (FRNB is per bucket, so mean is safe for pivot join)
+    returns_df = all_res.group_by("bucket_ts").agg(pl.col("FRNB").mean())
+    joined = pivoted.join(returns_df, on="bucket_ts")
     
+    # 2. Resample to 30m
+    # Detect Time Unit
+    ts_diff = joined["bucket_ts"][1] - joined["bucket_ts"][0]
+    time_unit = "us" if ts_diff > 300_000 else "s" # heuristic
+    
+    joined = joined.with_columns(
+        pl.from_epoch(pl.col("bucket_ts"), time_unit=time_unit).alias("datetime")
+    ).sort("datetime")
+    
+    # Sum OFI and Returns over 30m
+    # We sum columns "0", "1", "2" and "FRNB"
+    # Also calculate Baseline (Sum of 0+1+2)
+    
+    resampled = (
+        joined.group_by_dynamic("datetime", every="30m")
+        .agg([
+            pl.col("0").sum(),
+            pl.col("1").sum(),
+            pl.col("2").sum(),
+            (pl.col("0") + pl.col("1") + pl.col("2")).sum().alias("Baseline"),
+            pl.col("FRNB").sum()
+        ])
+    ).sort("datetime")
+    
+    # 3. Vectorized Backtest Function
+    def calculate_equity(signal_col, df, cost_bps=3.0, threshold=0.75, window=48):
+        signal = df[signal_col].cast(pl.Float64).to_numpy()
+        returns = df["FRNB"].cast(pl.Float64).to_numpy()
+        
+        # Rolling Threshold
+        upper = (
+            pl.Series(signal)
+            .rolling_quantile(threshold, window_size=window)
+            .shift(1)
+            .fill_null(strategy="forward")
+            .fill_null(0) # fallback
+            .to_numpy()
+        )
+        lower = (
+            pl.Series(signal)
+            .rolling_quantile(1-threshold, window_size=window)
+            .shift(1)
+            .fill_null(strategy="forward")
+            .fill_null(0)
+            .to_numpy()
+        )
+        
+        # Logic
+        pos = np.zeros(len(signal))
+        pos[signal > upper] = 1
+        pos[signal < lower] = -1
+        
+        # FIX LOOKAHEAD: Position determined at T trades Return at T+1
+        pos = np.roll(pos, 1)
+        pos[0] = 0
+        
+        # PnL
+        gross = pos * returns
+        trades = np.abs(np.diff(pos, prepend=0))
+        costs = trades * (cost_bps / 10000.0)
+        net = gross - costs
+        return np.cumsum(net)
+
+    # 4. Plot
     cluster_names = {
-        0: "Passive (Noise)",
-        1: "Opportunistic (Alpha)",
-        2: "Directional (Toxic)"
+        "0": "Passive",
+        "1": "Opportunistic (Alpha)",
+        "2": "Directional",
+        "Baseline": "Baseline (Agg OFI)"
     }
     
     plt.figure(figsize=(12, 6))
     
-    for c in range(k):
-        col = str(c)
-        if col not in pivoted.columns: continue
+    for col in ["0", "1", "2", "Baseline"]:
+        if col not in resampled.columns: continue
+        equity = calculate_equity(col, resampled)
+        plt.plot(equity, label=cluster_names.get(col, col))
         
-        # PnL = Sign(OFI) * Return
-        # We use series math directly
-        pnl_series = (pivoted[col].sign() * pivoted["FRNB"]).cum_sum()
-        plt.plot(pnl_series.to_numpy(), label=cluster_names.get(c, f"Cluster {c}"))
-        
-    plt.title(f"Rolling Walk-Forward PnL (Train={train_window_days}d)")
+    plt.title("Realistic Backtest: 30m Buckets, Top 75% Signal, 3bps Cost")
+    plt.ylabel("Cumulative Net Return (Log)")
+    plt.xlabel("30m Intervals")
     plt.legend()
     plt.grid(True)
     plt.savefig(os.path.join(out_dir, "rolling_pnl.png"))
-    print(f"Saved rolling PnL plot to {out_dir}/rolling_pnl.png")
+    print(f"Saved robust PnL plot to {out_dir}/rolling_pnl.png")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
