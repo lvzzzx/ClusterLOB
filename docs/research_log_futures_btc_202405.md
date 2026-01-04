@@ -198,6 +198,35 @@ In Binance Futures, the **Aggressive ($\phi_1$)** flow represents the primary mo
 *   **Mechanism:** Aggressive trades hitting thick walls in crypto are frequently **Liquidations**. These are price-insensitive and create "cascades" that drive the price further in the direction of the hit.
 *   **Market Making Strategy:** To be profitable in this regime, the strategy must **Skew WITH the Toxic Flow** ($\phi_1$) to capture the liquidation trend and **Widen AGAINST the Supported Flow** ($\phi_2$), which often represents late-to-the-party retail or spoofed walls that mean-revert.
 
+---
+
+## Experiment 9: In-Sample vs Out-of-Sample IC Gap (5-Min Buckets)
+
+### 1. Objective
+Diagnose whether the large IC drop vs. the original in-sample results is primarily caused by train/test separation.
+
+### 2. Experimental Setup
+*   **Bucket:** 5 minutes (300,000,000 us)
+*   **Horizons:** 1, 2, 5
+*   **In-sample window:** 2024-05-01 to 2024-05-08 (8 days, same span as train+test)
+*   **Out-of-sample window:** 2024-05-08 only (first test day in walk-forward)
+*   **Comparison output:** `outputs/insample_outsample_5min_firstwin/insample_outsample_comparison.csv`
+*   **Plot:** `outputs/insample_outsample_5min_firstwin/insample_vs_outsample_ic_size.png`
+
+### 3. In-Sample IC Summary (Mean Across Horizons)
+*   **Opportunistic (Cluster 1):** size 0.0617, count 0.0225
+*   **Passive (Cluster 0):** size 0.0347, count 0.0278
+*   **All (Cluster -1):** size 0.0447, count 0.0284
+*   **Toxic (Cluster 2):** size -0.0072, count 0.0146
+
+### 4. Findings
+*   **Large IC drop is expected** when moving from in-sample to out-of-sample.
+*   The in-sample ICs (0.03 to 0.06 range) are inflated relative to the single-day out-of-sample ICs, which are often near zero or sign-unstable.
+*   This confirms the main driver of the 10x gap vs. the original commit is **train/test separation**, not a change in the return definition.
+
+### 5. Implication
+The model is not necessarily broken. It is **more realistic** out-of-sample, and signal quality must be judged across multiple test windows rather than one day.
+
 ### 4. Final Strategic Mapping
 *   **Alpha Signal ($Sig_{skew}$):** Derived from **Cluster 2** (Aggressive/Toxic).
 *   **Hazard Signal ($Sig_{hazard}$):** Derived from **Cluster 1** (Supported/Opportunistic).
